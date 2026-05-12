@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>HOOPFORM ULTRA</title>
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Rajdhani:wght@600;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --orange: #FF5500; --bg: #050505; --surface: #111; --text: #fff; }
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body { background: var(--bg); color: var(--text); font-family: 'Rajdhani', sans-serif; overflow: hidden; height: 100vh; }
+
+        /* INTERFAZ PRINCIPAL */
+        .screen { display: none; height: 100vh; flex-direction: column; padding: 20px; }
+        .active { display: flex; }
+
+        .header { text-align: center; margin-bottom: 30px; }
+        .logo { font-family: 'Bebas Neue'; font-size: 48px; letter-spacing: 2px; }
+        .logo span { color: var(--orange); }
+
+        /* GRID DE ENTRENAMIENTOS (ESTILO CLAUDE) */
+        .drills-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; flex: 1; }
+        .drill-card { background: var(--surface); padding: 20px; border-radius: 20px; border: 1px solid #222; text-align: center; transition: 0.3s; }
+        .drill-card:active { transform: scale(0.95); background: #1a1a1a; }
+        .drill-icon { font-size: 32px; margin-bottom: 10px; display: block; }
+        .drill-name { font-family: 'Bebas Neue'; font-size: 20px; color: var(--orange); }
+
+        /* CÁMARA Y HUD */
+        #cam-screen { padding: 0; position: relative; }
+        #cam-container { position: relative; width: 100%; height: 100%; background: #000; }
+        video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        
+        .hud-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; padding: 20px; pointer-events: none; }
+        .stats-row { display: flex; justify-content: space-around; }
+        .stat-box { background: rgba(0,0,0,0.8); padding: 12px; border-radius: 15px; border: 1px solid rgba(255,85,0,0.3); text-align: center; min-width: 90px; }
+        .stat-v { font-family: 'Bebas Neue'; font-size: 36px; color: var(--orange); line-height: 1; }
+        .stat-l { font-size: 10px; color: #aaa; text-transform: uppercase; }
+
+        .env-pill { position: absolute; top: 100px; left: 50%; transform: translateX(-50%); display: flex; background: rgba(0,0,0,0.8); border-radius: 50px; padding: 4px; pointer-events: all; }
+        .env-btn { padding: 6px 15px; border-radius: 50px; border: none; background: transparent; color: #666; font-family: 'Bebas Neue'; font-size: 14px; cursor: pointer; }
+        .env-btn.active { background: var(--orange); color: white; }
+
+        /* CONTROLES */
+        .bottom-bar { position: absolute; bottom: 30px; left: 0; right: 0; padding: 0 20px; pointer-events: all; }
+        .btn-exit { background: rgba(255,25,25,0.2); border: 1px solid #ff1919; color: #ff1919; width: 100%; padding: 15px; border-radius: 15px; font-family: 'Bebas Neue'; font-size: 18px; }
+
+        #perfect-glow { position: absolute; inset: 0; border: 0px solid gold; pointer-events: none; transition: 0.3s; z-index: 10; }
+        .glow-active { border: 10px solid gold !important; box-shadow: inset 0 0 50px gold; }
+    </style>
+</head>
+<body>
+
+    <div id="home-screen" class="screen active">
+        <div class="header">
+            <div class="logo">HOOPFORM <span>ULTRA</span></div>
+            <p style="color:#666">Selecciona tu entrenamiento</p>
+        </div>
+        <div class="drills-grid">
+            <div class="drill-card" onclick="startDrill('shoot', 'Catch & Shoot')">
+                <span class="drill-icon">🎯</span>
+                <span class="drill-name">TIROS</span>
+            </div>
+            <div class="drill-card" onclick="startDrill('dribble', 'Dribbles Pro')">
+                <span class="drill-icon">⚡</span>
+                <span class="drill-name">DRIBBLES</span>
+            </div>
+            <div class="drill-card" onclick="startDrill('defense', 'Postura Defensiva')">
+                <span class="drill-icon">🛡️</span>
+                <span class="drill-name">DEFENSA</span>
+            </div>
+            <div class="drill-card" onclick="startDrill('crossover', 'Crossover')">
+                <span class="drill-icon">🔄</span>
+                <span class="drill-name">CROSSOVER</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="cam-screen" class="screen">
+        <div id="cam-container">
+            <video id="webcam" playsinline muted></video>
+            <canvas id="output-canvas"></canvas>
+            <div id="perfect-glow"></div>
+            
+            <div class="env-pill">
+                <button id="btn-casa" class="env-btn active" onclick="setEnv('casa')">🏠 CASA</button>
+                <button id="btn-cancha" class="env-btn" onclick="setEnv('cancha')">🏀 CANCHA</button>
+            </div>
+
+            <div class="hud-overlay">
+                <div class="stats-row">
+                    <div class="stat-box"><div class="stat-v" id="count-val">0</div><div class="stat-l">REPS</div></div>
+                    <div class="stat-box"><div class="stat-v" id="score-val">--</div><div class="stat-l">FORMA</div></div>
+                    <div class="stat-box"><div class="stat-v" id="bpm-val">--</div><div class="stat-l">BPM</div></div>
+                </div>
+                <div class="bottom-bar">
+                    <button class="btn-exit" onclick="exitCam()">TERMINAR ENTRENAMIENTO</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+
+    <script>
+        let state = { mode: '', env: 'casa', reps: 0, isDribbling: false, lastY: 0 };
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('output-canvas');
+        const ctx = canvas.getContext('2d');
+
+        function say(t) {
+            const m = new SpeechSynthesisUtterance(t);
+            m.lang = 'es-ES';
+            window.speechSynthesis.speak(m);
+        }
+
+        function setEnv(e) {
+            state.env = e;
+            document.getElementById('btn-casa').classList.toggle('active', e === 'casa');
+            document.getElementById('btn-cancha').classList.toggle('active', e === 'cancha');
+            say("Modo " + e);
+        }
+
+        function startDrill(mode, name) {
+            state.mode = mode;
+            state.reps = 0;
+            document.getElementById('home-screen').classList.remove('active');
+            document.getElementById('cam-screen').classList.add('active');
+            initCam();
+            say("Iniciando " + name);
+        }
+
+        function exitCam() {
+            location.reload(); // Forma más limpia de resetear cámara y estados
+        }
+
+        function onResults(res) {
+            if (!res.poseLandmarks) return;
+            
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.clearRect(0,0, canvas.width, canvas.height);
+
+            const lm = res.poseLandmarks;
+            const rWrist = lm[16], lWrist = lm[15], rShoulder = lm[12];
+            const handY = Math.max(rWrist.y, lWrist.y);
+
+            // DETECCIÓN AUTOMÁTICA (TU PETICIÓN)
+            if (state.mode === 'dribble' || state.mode === 'crossover') {
+                const limit = state.env === 'casa' ? 0.75 : 0.65;
+                if (handY > limit && handY < state.lastY && !state.isDribbling) {
+                    state.isDribbling = true;
+                    state.reps++;
+                    document.getElementById('count-val').textContent = state.reps;
+                    if(state.reps % 10 === 0) say(state.reps + " botes");
+                }
+                if (handY > state.lastY) state.isDribbling = false;
+            } else if (state.mode === 'shoot') {
+                if (rWrist.y < rShoulder.y - 0.2 && !state.isDribbling) {
+                    state.isDribbling = true;
+                    state.reps++;
+                    document.getElementById('count-val').textContent = state.reps;
+                    // Efecto brillo dorado
+                    document.getElementById('perfect-glow').classList.add('glow-active');
+                    setTimeout(()=>document.getElementById('perfect-glow').classList.remove('glow-active'), 500);
+                }
+                if (rWrist.y > rShoulder.y) state.isDribbling = false;
+            }
+
+            state.lastY = handY;
+            drawSkel(lm);
+        }
+
+        function drawSkel(lm) {
+            const connections = [[11,12], [12,14], [14,16], [11,13], [13,15], [12,24], [11,23], [23,24]];
+            ctx.strokeStyle = "rgba(255,255,255,0.5)";
+            ctx.lineWidth = 3;
+            connections.forEach(([a,b]) => {
+                ctx.beginPath();
+                ctx.moveTo(lm[a].x * canvas.width, lm[a].y * canvas.height);
+                ctx.lineTo(lm[b].x * canvas.width, lm[b].y * canvas.height);
+                ctx.stroke();
+            });
+        }
+
+        async function initCam() {
+            const pose = new Pose({locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}`});
+            pose.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5 });
+            pose.onResults(onResults);
+
+            const camera = new Camera(video, {
+                onFrame: async () => { await pose.send({image: video}); },
+                width: 640, height: 480
+            });
+            camera.start().catch(err => {
+                alert("Error de cámara: Asegúrate de dar permisos.");
+            });
+        }
+    </script>
+</body>
+</html>
