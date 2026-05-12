@@ -1,0 +1,1025 @@
+<script>
+
+//////////////////////////////
+// STATE
+//////////////////////////////
+
+let mode = 'shoot';
+
+let mainCam = null;
+let mainPose = null;
+
+let sessions = JSON.parse(
+  localStorage.getItem('hf_pro_sessions') || '[]'
+);
+
+let smoothLandmarks = null;
+
+let shotCount = 0;
+
+let frameSkip = 0;
+
+let lastVoice = 0;
+
+let analyzing = false;
+
+//////////////////////////////
+// HELPERS
+//////////////////////////////
+
+function L(lm, i){
+  return lm[i];
+}
+
+function angle(a,b,c){
+
+  const ab = {
+    x: a.x - b.x,
+    y: a.y - b.y
+  };
+
+  const cb = {
+    x: c.x - b.x,
+    y: c.y - b.y
+  };
+
+  const dot =
+    ab.x * cb.x +
+    ab.y * cb.y;
+
+  const mag =
+    Math.hypot(ab.x, ab.y) *
+    Math.hypot(cb.x, cb.y);
+
+  if(mag === 0) return 0;
+
+  return (
+    Math.acos(
+      Math.max(
+        -1,
+        Math.min(1, dot / mag)
+      )
+    ) * 180 / Math.PI
+  );
+
+}
+
+//////////////////////////////
+// POSE FILTER
+//////////////////////////////
+
+function poseVisible(lm){
+
+  const important = [
+    11,12,13,14,15,16,
+    23,24,25,26,27,28
+  ];
+
+  return important.every(i =>
+    lm[i] &&
+    lm[i].visibility > 0.55
+  );
+
+}
+
+//////////////////////////////
+// SMOOTHING
+//////////////////////////////
+
+function smoothPose(lm){
+
+  if(!smoothLandmarks){
+
+    smoothLandmarks =
+      lm.map(p => ({ ...p }));
+
+    return lm;
+
+  }
+
+  const alpha = 0.75;
+
+  smoothLandmarks = lm.map((p,i)=>({
+
+    ...p,
+
+    x:
+      smoothLandmarks[i].x * alpha +
+      p.x * (1 - alpha),
+
+    y:
+      smoothLandmarks[i].y * alpha +
+      p.y * (1 - alpha)
+
+  }));
+
+  return smoothLandmarks;
+
+}
+
+//////////////////////////////
+// VOICE
+//////////////////////////////
+
+const voiceQueue = [];
+
+let speaking = false;
+
+function speak(text){
+
+  if(!window.speechSynthesis) return;
+
+  voiceQueue.push(text);
+
+  if(!speaking){
+    flushVoice();
+  }
+
+}
+
+function flushVoice(){
+
+  if(!voiceQueue.length){
+
+    speaking = false;
+
+    return;
+
+  }
+
+  speaking = true;
+
+  const text = voiceQueue.shift();
+
+  const utter =
+    new SpeechSynthesisUtterance(text);
+
+  utter.lang = 'es-ES';
+
+  utter.rate = 0.96;
+
+  utter.pitch = 1;
+
+  utter.volume = 1;
+
+  const voices =
+    speechSynthesis.getVoices();
+
+  const spanishVoice =
+    voices.find(v =>
+      v.lang.includes('es')
+    );
+
+  if(spanishVoice){
+    utter.voice = spanishVoice;
+  }
+
+  utter.onend = () => {
+
+    speaking = false;
+
+    setTimeout(flushVoice, 150);
+
+  };
+
+  speechSynthesis.speak(utter);
+
+}
+
+//////////////////////////////
+// SHOT STATE MACHINE
+//////////////////////////////
+
+const shotState = {
+
+  phase: 'idle',
+
+  releaseTime: 0,
+
+  cooldown: false
+
+};
+
+function detectShot(lm){
+
+  if(
+    mode !== 'shoot' &&
+    mode !== 'followthrough'
+  ) return false;
+
+  const shoulder = L(lm,12);
+  const elbow = L(lm,14);
+  const wrist = L(lm,16);
+
+  const elbowAngle =
+    angle(shoulder, elbow, wrist);
+
+  const wristAboveShoulder =
+    wrist.y < shoulder.y;
+
+  const extension =
+    elbowAngle > 145;
+
+  switch(shotState.phase){
+
+    case 'idle':
+
+      if(
+        elbowAngle > 65 &&
+        elbowAngle < 120
+      ){
+        shotState.phase = 'load';
+      }
+
+    break;
+
+    case 'load':
+
+      if(wristAboveShoulder){
+        shotState.phase = 'lift';
+      }
+
+    break;
+
+    case 'lift':
+
+      if(extension){
+
+        shotState.phase = 'release';
+
+        shotState.releaseTime =
+          Date.now();
+
+      }
+
+    break;
+
+    case 'release':
+
+      if(
+        Date.now() -
+        shotState.releaseTime > 220
+      ){
+
+        shotState.phase = 'follow';
+
+        if(!shotState.cooldown){
+
+          shotState.cooldown = true;
+
+          setTimeout(()=>{
+
+            shotState.cooldown = false;
+
+          },1800);
+
+          shotState.phase = 'idle';
+
+          return true;
+
+        }
+
+      }
+
+    break;
+
+  }
+
+  return false;
+
+}
+
+//////////////////////////////
+// DRIBBLE STATE
+//////////////////////////////
+
+const dribbleState = {
+
+  phase: 'up',
+
+  reps: 0,
+
+  lastRep: 0
+
+};
+
+const dribbleHist = [];
+
+function detectDribble(lm){
+
+  if(mode !== 'dribble') return;
+
+  const wrist = L(lm,16);
+
+  dribbleHist.push(wrist.y);
+
+  if(dribbleHist.length > 8){
+    dribbleHist.shift();
+  }
+
+  if(dribbleHist.length < 8){
+    return;
+  }
+
+  const prev =
+    dribbleHist[dribbleHist.length - 2];
+
+  const curr =
+    dribbleHist[dribbleHist.length - 1];
+
+  const movingDown =
+    curr > prev + 0.012;
+
+  const movingUp =
+    curr < prev - 0.012;
+
+  switch(dribbleState.phase){
+
+    case 'up':
+
+      if(movingDown){
+
+        dribbleState.phase = 'down';
+
+      }
+
+    break;
+
+    case 'down':
+
+      if(movingUp){
+
+        const now = Date.now();
+
+        if(now - dribbleState.lastRep > 320){
+
+          dribbleState.lastRep = now;
+
+          dribbleState.reps++;
+
+          document.getElementById(
+            'shot-count'
+          ).textContent =
+            dribbleState.reps;
+
+          randomDribbleVoice();
+
+        }
+
+        dribbleState.phase = 'up';
+
+      }
+
+    break;
+
+  }
+
+}
+
+//////////////////////////////
+// DRIBBLE VOICE
+//////////////////////////////
+
+function randomDribbleVoice(){
+
+  if(Date.now() - lastVoice < 2500){
+    return;
+  }
+
+  lastVoice = Date.now();
+
+  const msgs = [
+
+    'Buen ritmo',
+
+    'Controla el balón',
+
+    'Más bajo el dribble',
+
+    'Cabeza arriba',
+
+    'Excelente velocidad'
+
+  ];
+
+  speak(
+    msgs[
+      Math.floor(
+        Math.random() * msgs.length
+      )
+    ]
+  );
+
+}
+
+//////////////////////////////
+// ANALYSIS
+//////////////////////////////
+
+function analyzePose(lm){
+
+  const good = [];
+
+  const warn = [];
+
+  const bad = [];
+
+  let score = 10;
+
+  const rs = L(lm,12);
+  const re = L(lm,14);
+  const rw = L(lm,16);
+
+  const rh = L(lm,24);
+  const rk = L(lm,26);
+  const ra = L(lm,28);
+
+  const ls = L(lm,11);
+  const lh = L(lm,23);
+  const lk = L(lm,25);
+  const la = L(lm,27);
+
+  const elbow =
+    angle(rs,re,rw);
+
+  const knees =
+    (
+      angle(rh,rk,ra) +
+      angle(lh,lk,la)
+    ) / 2;
+
+  if(elbow < 70){
+
+    bad.push('Codo cerrado');
+
+    score -= 2.5;
+
+  } else if(elbow > 150){
+
+    warn.push('Relaja el brazo');
+
+    score -= 1;
+
+  } else {
+
+    good.push('Codo bien');
+
+  }
+
+  if(knees > 168){
+
+    bad.push('Dobla rodillas');
+
+    score -= 2.5;
+
+  } else {
+
+    good.push('Base buena');
+
+  }
+
+  if(Math.abs(ls.y - rs.y) > 0.07){
+
+    warn.push('Hombros desnivelados');
+
+    score -= 1;
+
+  }
+
+  if(rw.y < rs.y){
+
+    good.push('Release alto');
+
+  }
+
+  score =
+    Math.max(
+      0,
+      Math.min(10, score)
+    );
+
+  return {
+
+    score,
+
+    good,
+
+    warn,
+
+    bad,
+
+    elbow,
+
+    knees
+
+  };
+
+}
+
+//////////////////////////////
+// HUD
+//////////////////////////////
+
+function updateHUD(r){
+
+  const score =
+    document.getElementById(
+      'score-num'
+    );
+
+  score.textContent =
+    r.score.toFixed(0);
+
+  if(r.score >= 8){
+
+    score.style.color =
+      '#00E676';
+
+  } else if(r.score >= 5){
+
+    score.style.color =
+      '#FF8800';
+
+  } else {
+
+    score.style.color =
+      '#FF1744';
+
+  }
+
+  const status =
+    document.getElementById(
+      'status-txt'
+    );
+
+  if(r.bad.length){
+
+    status.textContent =
+      '⚠ ' +
+      r.bad[0].toUpperCase();
+
+    status.style.color =
+      '#FF1744';
+
+  } else if(r.warn.length){
+
+    status.textContent =
+      '▲ ' +
+      r.warn[0].toUpperCase();
+
+    status.style.color =
+      '#FF8800';
+
+  } else {
+
+    status.textContent =
+      '🔥 FORMA PERFECTA';
+
+    status.style.color =
+      '#00E676';
+
+  }
+
+  document.getElementById(
+    'tags'
+  ).innerHTML = [
+
+    ...r.bad.map(t =>
+      `<span class="tag er">✗ ${t}</span>`
+    ),
+
+    ...r.warn.map(t =>
+      `<span class="tag wn">▲ ${t}</span>`
+    ),
+
+    ...r.good.map(t =>
+      `<span class="tag ok">✓ ${t}</span>`
+    )
+
+  ].join('');
+
+}
+
+//////////////////////////////
+// FEEDBACK
+//////////////////////////////
+
+function feedbackVoice(r){
+
+  if(Date.now() - lastVoice < 4000){
+    return;
+  }
+
+  lastVoice = Date.now();
+
+  if(r.bad.length){
+
+    const msg = {
+
+      'Codo cerrado':
+        'Abre el codo debajo del balón',
+
+      'Dobla rodillas':
+        'Usa más las piernas'
+
+    };
+
+    speak(
+      msg[r.bad[0]] ||
+      r.bad[0]
+    );
+
+  } else if(r.score >= 9){
+
+    const praise = [
+
+      'Excelente tiro',
+
+      'Mecánica profesional',
+
+      'Muy buena forma',
+
+      'Perfecto'
+
+    ];
+
+    speak(
+      praise[
+        Math.floor(
+          Math.random() *
+          praise.length
+        )
+      ]
+    );
+
+  }
+
+}
+
+//////////////////////////////
+// DRAW
+//////////////////////////////
+
+function drawSkeleton(lm, canvas){
+
+  const ctx =
+    canvas.getContext('2d');
+
+  ctx.clearRect(
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
+
+  const w = canvas.width;
+  const h = canvas.height;
+
+  const pairs = [
+
+    [11,12],
+    [11,13],
+    [13,15],
+    [12,14],
+    [14,16],
+
+    [11,23],
+    [12,24],
+    [23,24],
+
+    [23,25],
+    [25,27],
+
+    [24,26],
+    [26,28]
+
+  ];
+
+  ctx.lineWidth = 5;
+
+  ctx.lineCap = 'round';
+
+  pairs.forEach(([a,b])=>{
+
+    const p1 = lm[a];
+    const p2 = lm[b];
+
+    if(
+      p1.visibility < 0.4 ||
+      p2.visibility < 0.4
+    ) return;
+
+    ctx.beginPath();
+
+    ctx.moveTo(
+      p1.x * w,
+      p1.y * h
+    );
+
+    ctx.lineTo(
+      p2.x * w,
+      p2.y * h
+    );
+
+    ctx.strokeStyle =
+      '#FF5500';
+
+    ctx.stroke();
+
+  });
+
+  lm.forEach(p=>{
+
+    if(p.visibility < 0.4){
+      return;
+    }
+
+    ctx.beginPath();
+
+    ctx.arc(
+      p.x * w,
+      p.y * h,
+      6,
+      0,
+      Math.PI * 2
+    );
+
+    ctx.fillStyle =
+      '#00E676';
+
+    ctx.fill();
+
+  });
+
+}
+
+//////////////////////////////
+// CAMERA
+//////////////////////////////
+
+async function startCam(){
+
+  if(analyzing) return;
+
+  analyzing = true;
+
+  const wrap =
+    document.getElementById(
+      'cam-wrap'
+    );
+
+  wrap.style.display = 'block';
+
+  document.getElementById(
+    'a-idle'
+  ).style.display = 'none';
+
+  document.getElementById(
+    'cam-ctrls'
+  ).style.display = 'flex';
+
+  const video =
+    document.getElementById(
+      'vid'
+    );
+
+  try{
+
+    mainPose = new Pose({
+
+      locateFile: file =>
+
+      `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+
+    });
+
+    mainPose.setOptions({
+
+      modelComplexity: 1,
+
+      smoothLandmarks: true,
+
+      minDetectionConfidence: 0.6,
+
+      minTrackingConfidence: 0.6
+
+    });
+
+    mainPose.onResults(onResults);
+
+    const stream =
+      await navigator
+      .mediaDevices
+      .getUserMedia({
+
+        video: {
+
+          facingMode: 'user',
+
+          width: { ideal: 640 },
+
+          height: { ideal: 480 }
+
+        }
+
+      });
+
+    video.srcObject = stream;
+
+    await video.play();
+
+    mainCam = new Camera(video, {
+
+      onFrame: async () => {
+
+        frameSkip++;
+
+        if(frameSkip % 2 !== 0){
+          return;
+        }
+
+        await mainPose.send({
+          image: video
+        });
+
+      },
+
+      width: 640,
+
+      height: 480
+
+    });
+
+    mainCam.start();
+
+    speak(
+      'Análisis iniciado'
+    );
+
+  } catch(err){
+
+    alert(
+      'No se pudo abrir la cámara'
+    );
+
+    analyzing = false;
+
+  }
+
+}
+
+//////////////////////////////
+// RESULTS
+//////////////////////////////
+
+function onResults(res){
+
+  const video =
+    document.getElementById(
+      'vid'
+    );
+
+  const canvas =
+    document.getElementById(
+      'cvs'
+    );
+
+  canvas.width =
+    video.videoWidth || 640;
+
+  canvas.height =
+    video.videoHeight || 480;
+
+  if(
+    !res.poseLandmarks ||
+    !poseVisible(res.poseLandmarks)
+  ){
+
+    return;
+
+  }
+
+  const lm =
+    smoothPose(
+      res.poseLandmarks
+    );
+
+  drawSkeleton(lm, canvas);
+
+  const result =
+    analyzePose(lm);
+
+  updateHUD(result);
+
+  feedbackVoice(result);
+
+  detectDribble(lm);
+
+  if(detectShot(lm)){
+
+    shotCount++;
+
+    document.getElementById(
+      'shot-count'
+    ).textContent =
+      shotCount;
+
+    speak('Tiro detectado');
+
+  }
+
+}
+
+//////////////////////////////
+// STOP CAMERA
+//////////////////////////////
+
+function stopCam(){
+
+  analyzing = false;
+
+  if(mainCam){
+
+    mainCam.stop();
+
+    mainCam = null;
+
+  }
+
+  if(mainPose){
+
+    mainPose.close();
+
+    mainPose = null;
+
+  }
+
+  const video =
+    document.getElementById(
+      'vid'
+    );
+
+  if(video.srcObject){
+
+    video.srcObject
+      .getTracks()
+      .forEach(t=>t.stop());
+
+    video.srcObject = null;
+
+  }
+
+  document.getElementById(
+    'cam-wrap'
+  ).style.display = 'none';
+
+  document.getElementById(
+    'cam-ctrls'
+  ).style.display = 'none';
+
+  document.getElementById(
+    'a-idle'
+  ).style.display = 'flex';
+
+  speechSynthesis.cancel();
+
+}
+
+//////////////////////////////
+// MODE
+//////////////////////////////
+
+function pickMode(m){
+
+  mode = m;
+
+}
+
+//////////////////////////////
+// SAVE SESSION
+//////////////////////////////
+
+function saveSession(){
+
+  sessions.unshift({
+
+    date: Date.now(),
+
+    mode,
+
+    shots: shotCount
+
+  });
+
+  localStorage.setItem(
+    'hf_pro_sessions',
+    JSON.stringify(sessions)
+  );
+
+  speak(
+    'Sesión guardada'
+  );
+
+}
+
+</script>
